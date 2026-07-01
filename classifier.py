@@ -1,52 +1,51 @@
-import os
-import pickle
+import ImageClasification
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.optim import SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from matplotlib.pyplot import clf
-from skimage.io import imread
-from skimage.transform import resize
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import GridSearchCV
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
+def train_one_epoch(model, loader, optimizer, device, num_classes, use_mixup=True):
+    model.train()
+    total, correct, loss_sum = 0, 0, 0.0
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        if use_mixup:
+            x_m, y_soft = mixup_batch(x, y, num_classes)
+            logits = model(x_m)
+            loss = soft_cross_entropy(logits, y_soft)
+        else:
+            logits = model(x)
+            loss = nn.functional.cross_entropy(logits, y, label_smoothing=0.1)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        loss_sum += loss.item() * x.size(0)
+        total += x.size(0)
+        # Training accuracy vs the un-mixed labels `y` is only an approximation
+        # when mixup is on (the model saw soft targets, not y). Treat it as a
+        # rough progress signal; rely on val accuracy for real performance.
+        with torch.no_grad():
+            pred = logits.argmax(dim=-1)
+            correct += (pred == y).sum().item()
+    return loss_sum / total, correct / total
 
 
-# prepare data
-input_dir = os.path.join(os.getcwd(), 'clf-data')  # i dont have dataset because too big tho sooooooooooooo.........
-categories = ['empty', 'not_empty']
+@torch.no_grad()
+def evaluate(model, loader, device, num_classes):
+    model.eval()
+    total, correct = 0, 0
+    loss_sum = 0.0
+    cm = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        logits = model(x)
+        loss = nn.functional.cross_entropy(logits, y)
+        pred = logits.argmax(dim=-1)
+        for t, p in zip(y.cpu(), pred.cpu()):
+            cm[t, p] += 1
+        loss_sum += loss.item() * x.size(0)
+        total += x.size(0)
+        correct += (pred == y).sum().item()
+    return loss_sum / total, correct / total, cm
 
-data = []
-labels = []
-for category_idx, category in enumerate(categories):
-    for file in os.listdir(os.path.join(input_dir, category)):
-        img_path = os.path.join(input_dir, category, file)
-        img = imread(img_path)
-        img = resize(img, (15, 15))
-        data.append(img.flatten())
-        labels.append(category_idx)
-
-data = np.asarray(data)
-labels = np.asarray(labels)
-
-# train / test split
-x_train, x_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, shuffle=True, stratify=labels)
-
-# train classifier
-classifier = SVC()
-
-parameters = [{'gamma': [0.01, 0.001, 0.0001], 'C': [1, 10, 100, 1000]}]
-
-grid_search = GridSearchCV(classifier, parameters)
-
-grid_search.fit(x_train, y_train)
-
-# test performance
-best_estimator = grid_search.best_estimator_
-
-y_prediction = best_estimator.predict(x_test)
-
-score = accuracy_score(y_prediction, y_test)
-
-print('{}% of samples were correctly classified'.format(str(score * 100)))
-
-pickle.dump(best_estimator, open('./model.p', 'wb'))
